@@ -35,8 +35,8 @@ const specialElite = Special_Elite({ subsets: ["latin"], variable: "--font-speci
 const monoton = Monoton({ subsets: ["latin"], variable: "--font-monoton", weight: "400" });
 
 export const metadata: Metadata = {
-  title: "anshula",
-  description: "anshula",
+  title: "❤️ anshula — curiosity never dies because of people like you",
+  description: "curiosity never dies because of people like you",
   icons: {
     icon: "/icon.svg",
   },
