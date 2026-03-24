@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 
 const FONTS = [
   "--font-playfair",
@@ -20,26 +20,36 @@ const FONTS = [
   "--font-monoton",
 ];
 
-// Palette: warm gold / rose / white / soft lavender on black
+// Red palette: scarlet, crimson, rose, burgundy, coral, hot-pink-red, white-red
 const COLORS = [
+  "rgba(255,30,30,",
+  "rgba(220,20,60,",
+  "rgba(255,80,80,",
+  "rgba(180,0,30,",
+  "rgba(255,120,100,",
   "rgba(255,255,255,",
-  "rgba(255,214,128,",
-  "rgba(255,182,193,",
-  "rgba(200,200,255,",
-  "rgba(255,255,200,",
-  "rgba(180,255,220,",
-  "rgba(255,200,160,",
+  "rgba(255,60,100,",
+  "rgba(140,0,20,",
+  "rgba(255,160,160,",
 ];
 
 interface Token {
   text: string;
   fontVar: string;
   fontSize: number;
-  color: string;
+  colorBase: string;
   opacity: number;
-  x: number;
-  y: number;
+  baseX: number;
+  baseY: number;
   rotation: number;
+}
+
+// Mutable physics state per token (not in React state — avoids re-renders)
+interface TokenPhysics {
+  dx: number;
+  dy: number;
+  vx: number;
+  vy: number;
 }
 
 function seededRandom(seed: number) {
@@ -56,7 +66,6 @@ function buildTokens(width: number, height: number): Token[] {
 
   const colWidth = 260;
   const rowHeight = 90;
-
   const cols = Math.ceil(width / colWidth) + 2;
   const rows = Math.ceil(height / rowHeight) + 2;
 
@@ -79,19 +88,10 @@ function buildTokens(width: number, height: number): Token[] {
       const rotation = (rand() - 0.5) * 18;
       const opacity = 0.12 + rand() * 0.75;
 
-      const x = col * colWidth + stagger - colWidth * 0.3 + rand() * 40 - 20;
-      const y = row * rowHeight - rowHeight * 0.5 + rand() * 30 - 15;
+      const baseX = col * colWidth + stagger - colWidth * 0.3 + rand() * 40 - 20;
+      const baseY = row * rowHeight - rowHeight * 0.5 + rand() * 30 - 15;
 
-      tokens.push({
-        text: "anshula",
-        fontVar,
-        fontSize,
-        color: colorBase,
-        opacity,
-        x,
-        y,
-        rotation,
-      });
+      tokens.push({ text: "anshula", fontVar, fontSize, colorBase, opacity, baseX, baseY, rotation });
 
       fontIndex++;
       colorIndex += 3;
@@ -101,22 +101,125 @@ function buildTokens(width: number, height: number): Token[] {
   return tokens;
 }
 
+// Spring constants
+const SPRING = 0.06;    // pull back to origin
+const DAMPING = 0.82;   // velocity decay
+const REPEL_RADIUS = 180;
+const REPEL_FORCE = 4500;
+
 export default function Home() {
   const [tokens, setTokens] = useState<Token[]>([]);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const physicsRef = useRef<TokenPhysics[]>([]);
+  const spanRefs = useRef<(HTMLSpanElement | null)[]>([]);
+  const pointerRef = useRef<{ x: number; y: number } | null>(null);
+  const rafRef = useRef<number>(0);
+
+  // Build tokens on mount and resize
+  const compute = useCallback(() => {
+    const t = buildTokens(window.innerWidth, window.innerHeight);
+    setTokens(t);
+    physicsRef.current = t.map(() => ({ dx: 0, dy: 0, vx: 0, vy: 0 }));
+    spanRefs.current = new Array(t.length).fill(null);
+  }, []);
 
   useEffect(() => {
-    function compute() {
-      setTokens(buildTokens(window.innerWidth, window.innerHeight));
-    }
     compute();
     window.addEventListener("resize", compute);
     return () => window.removeEventListener("resize", compute);
+  }, [compute]);
+
+  // Mouse / touch pointer tracking
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      pointerRef.current = { x: e.clientX, y: e.clientY };
+    };
+    const onTouch = (e: TouchEvent) => {
+      if (e.touches.length > 0) {
+        pointerRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      }
+    };
+    const onLeave = () => { pointerRef.current = null; };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("touchmove", onTouch, { passive: true });
+    window.addEventListener("mouseleave", onLeave);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("touchmove", onTouch);
+      window.removeEventListener("mouseleave", onLeave);
+    };
   }, []);
+
+  // DeviceOrientation (gyroscope) — maps tilt to a virtual pointer
+  useEffect(() => {
+    const onOrient = (e: DeviceOrientationEvent) => {
+      // gamma = left/right tilt [-90, 90], beta = front/back [-180, 180]
+      if (e.gamma == null || e.beta == null) return;
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      pointerRef.current = {
+        x: w / 2 + (e.gamma / 45) * w * 0.6,
+        y: h / 2 + ((e.beta - 30) / 45) * h * 0.6,
+      };
+    };
+    window.addEventListener("deviceorientation", onOrient, true);
+    return () => window.removeEventListener("deviceorientation", onOrient, true);
+  }, []);
+
+  // Animation loop — runs outside React state
+  useEffect(() => {
+    if (tokens.length === 0) return;
+
+    const loop = () => {
+      const physics = physicsRef.current;
+      const pointer = pointerRef.current;
+
+      for (let i = 0; i < physics.length; i++) {
+        const token = tokens[i];
+        const p = physics[i];
+        const el = spanRefs.current[i];
+        if (!el) continue;
+
+        // Repulsion from pointer
+        if (pointer) {
+          const cx = token.baseX + p.dx;
+          const cy = token.baseY + p.dy;
+          const ddx = cx - pointer.x;
+          const ddy = cy - pointer.y;
+          const dist = Math.sqrt(ddx * ddx + ddy * ddy);
+
+          if (dist < REPEL_RADIUS && dist > 0.1) {
+            const force = REPEL_FORCE / (dist * dist);
+            p.vx += (ddx / dist) * force;
+            p.vy += (ddy / dist) * force;
+          }
+        }
+
+        // Spring back to origin
+        p.vx += -p.dx * SPRING;
+        p.vy += -p.dy * SPRING;
+
+        // Damping
+        p.vx *= DAMPING;
+        p.vy *= DAMPING;
+
+        // Integrate
+        p.dx += p.vx;
+        p.dy += p.vy;
+
+        // Apply transform directly to DOM (no React state re-render)
+        el.style.transform = `translate(${p.dx}px, ${p.dy}px) rotate(${token.rotation}deg)`;
+      }
+
+      rafRef.current = requestAnimationFrame(loop);
+    };
+
+    rafRef.current = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [tokens]);
 
   return (
     <div
-      ref={containerRef}
       style={{
         width: "100vw",
         height: "100vh",
@@ -128,13 +231,14 @@ export default function Home() {
       {tokens.map((t, i) => (
         <span
           key={i}
+          ref={(el) => { spanRefs.current[i] = el; }}
           style={{
             position: "absolute",
-            left: t.x,
-            top: t.y,
+            left: t.baseX,
+            top: t.baseY,
             fontFamily: `var(${t.fontVar})`,
             fontSize: t.fontSize,
-            color: `${t.color}${t.opacity})`,
+            color: `${t.colorBase}${t.opacity})`,
             transform: `rotate(${t.rotation}deg)`,
             transformOrigin: "center center",
             whiteSpace: "nowrap",
@@ -142,6 +246,7 @@ export default function Home() {
             lineHeight: 1,
             pointerEvents: "none",
             letterSpacing: t.fontSize > 50 ? "0.05em" : "normal",
+            willChange: "transform",
           }}
         >
           {t.text}

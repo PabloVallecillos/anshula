@@ -37,6 +37,9 @@ const monoton = Monoton({ subsets: ["latin"], variable: "--font-monoton", weight
 export const metadata: Metadata = {
   title: "anshula",
   description: "anshula",
+  icons: {
+    icon: "/icon.svg",
+  },
 };
 
 export default function RootLayout({
