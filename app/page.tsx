@@ -20,7 +20,6 @@ const FONTS = [
   "--font-monoton",
 ];
 
-// Red palette: scarlet, crimson, rose, burgundy, coral, hot-pink-red, white-red
 const COLORS = [
   "rgba(255,30,30,",
   "rgba(220,20,60,",
@@ -44,8 +43,14 @@ interface Token {
   rotation: number;
 }
 
-// Mutable physics state per token (not in React state — avoids re-renders)
 interface TokenPhysics {
+  // Drift / float
+  driftX: number;       // accumulated horizontal drift
+  floatPhase: number;   // sine phase offset (radians)
+  floatAmp: number;     // vertical float amplitude (px)
+  floatSpeed: number;   // sine speed (rad/frame)
+  driftSpeed: number;   // px/frame horizontal
+  // Repulsion spring
   dx: number;
   dy: number;
   vx: number;
@@ -101,9 +106,22 @@ function buildTokens(width: number, height: number): Token[] {
   return tokens;
 }
 
-// Spring constants
-const SPRING = 0.06;    // pull back to origin
-const DAMPING = 0.82;   // velocity decay
+function buildPhysics(tokens: Token[], rand: () => number): TokenPhysics[] {
+  return tokens.map(() => ({
+    driftX: 0,
+    floatPhase: rand() * Math.PI * 2,
+    floatAmp: 6 + rand() * 18,         // 6–24px vertical float
+    floatSpeed: 0.008 + rand() * 0.018, // slow, varied sine
+    driftSpeed: 0.25 + rand() * 0.75,   // 0.25–1 px/frame rightward
+    dx: 0,
+    dy: 0,
+    vx: 0,
+    vy: 0,
+  }));
+}
+
+const SPRING = 0.06;
+const DAMPING = 0.82;
 const REPEL_RADIUS = 180;
 const REPEL_FORCE = 4500;
 
@@ -113,12 +131,13 @@ export default function Home() {
   const spanRefs = useRef<(HTMLSpanElement | null)[]>([]);
   const pointerRef = useRef<{ x: number; y: number } | null>(null);
   const rafRef = useRef<number>(0);
+  const frameRef = useRef<number>(0);
 
-  // Build tokens on mount and resize
   const compute = useCallback(() => {
+    const rand = seededRandom(99);
     const t = buildTokens(window.innerWidth, window.innerHeight);
     setTokens(t);
-    physicsRef.current = t.map(() => ({ dx: 0, dy: 0, vx: 0, vy: 0 }));
+    physicsRef.current = buildPhysics(t, rand);
     spanRefs.current = new Array(t.length).fill(null);
   }, []);
 
@@ -128,15 +147,12 @@ export default function Home() {
     return () => window.removeEventListener("resize", compute);
   }, [compute]);
 
-  // Mouse / touch pointer tracking
+  // Mouse / touch
   useEffect(() => {
-    const onMove = (e: MouseEvent) => {
-      pointerRef.current = { x: e.clientX, y: e.clientY };
-    };
+    const onMove = (e: MouseEvent) => { pointerRef.current = { x: e.clientX, y: e.clientY }; };
     const onTouch = (e: TouchEvent) => {
-      if (e.touches.length > 0) {
+      if (e.touches.length > 0)
         pointerRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-      }
     };
     const onLeave = () => { pointerRef.current = null; };
 
@@ -150,10 +166,9 @@ export default function Home() {
     };
   }, []);
 
-  // DeviceOrientation (gyroscope) — maps tilt to a virtual pointer
+  // Gyroscope
   useEffect(() => {
     const onOrient = (e: DeviceOrientationEvent) => {
-      // gamma = left/right tilt [-90, 90], beta = front/back [-180, 180]
       if (e.gamma == null || e.beta == null) return;
       const w = window.innerWidth;
       const h = window.innerHeight;
@@ -166,11 +181,15 @@ export default function Home() {
     return () => window.removeEventListener("deviceorientation", onOrient, true);
   }, []);
 
-  // Animation loop — runs outside React state
+  // Animation loop
   useEffect(() => {
     if (tokens.length === 0) return;
 
+    const screenW = window.innerWidth;
+
     const loop = () => {
+      frameRef.current++;
+      const t = frameRef.current;
       const physics = physicsRef.current;
       const pointer = pointerRef.current;
 
@@ -180,10 +199,20 @@ export default function Home() {
         const el = spanRefs.current[i];
         if (!el) continue;
 
-        // Repulsion from pointer
+        // --- Drift: move right, wrap around ---
+        p.driftX += p.driftSpeed;
+        const totalWidth = screenW + 400; // wrap zone wider than screen
+        if (token.baseX + p.driftX > totalWidth) {
+          p.driftX -= totalWidth + 400;
+        }
+
+        // --- Float: sine wave vertical ---
+        const floatY = Math.sin(t * p.floatSpeed + p.floatPhase) * p.floatAmp;
+
+        // --- Repulsion from pointer ---
         if (pointer) {
-          const cx = token.baseX + p.dx;
-          const cy = token.baseY + p.dy;
+          const cx = token.baseX + p.driftX + p.dx;
+          const cy = token.baseY + floatY + p.dy;
           const ddx = cx - pointer.x;
           const ddy = cy - pointer.y;
           const dist = Math.sqrt(ddx * ddx + ddy * ddy);
@@ -195,20 +224,18 @@ export default function Home() {
           }
         }
 
-        // Spring back to origin
+        // Spring back + damping
         p.vx += -p.dx * SPRING;
         p.vy += -p.dy * SPRING;
-
-        // Damping
         p.vx *= DAMPING;
         p.vy *= DAMPING;
-
-        // Integrate
         p.dx += p.vx;
         p.dy += p.vy;
 
-        // Apply transform directly to DOM (no React state re-render)
-        el.style.transform = `translate(${p.dx}px, ${p.dy}px) rotate(${token.rotation}deg)`;
+        const totalX = p.driftX + p.dx;
+        const totalY = floatY + p.dy;
+
+        el.style.transform = `translate(${totalX}px, ${totalY}px) rotate(${token.rotation}deg)`;
       }
 
       rafRef.current = requestAnimationFrame(loop);
